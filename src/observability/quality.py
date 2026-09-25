@@ -45,6 +45,19 @@ def run_data_quality_checks(df: pd.DataFrame, settings: Settings, report_name: s
     if not report_name.strip():
         raise ValueError("report_name must not be empty.")
 
+    if df.empty:
+        payload = {
+            "report_name": report_name,
+            "success": False,
+            "row_count": 0,
+            "expectation_count": 0,
+            "failed_expectation_count": 0,
+            "results": [],
+            "message": "DataFrame is empty.",
+        }
+        write_json(_quality_report_path(settings, report_name), payload)
+        return payload
+
     context = gx.get_context(mode="ephemeral")
     data_source = context.data_sources.add_pandas(name="papers_source")
     data_asset = data_source.add_dataframe_asset(name="papers_asset")
@@ -117,6 +130,20 @@ def build_freshness_report(df: pd.DataFrame, settings: Settings, report_path) ->
         raise TypeError("df must be a pandas DataFrame.")
 
     total_rows = int(len(df))
+    if total_rows == 0:
+        payload = {
+            "latest_published": None,
+            "oldest_published": None,
+            "stale_rows": 0,
+            "total_rows": 0,
+            "stale_ratio": 0.0,
+            "freshness_threshold_days": settings.freshness_threshold_days,
+            "max_stale_ratio": MAX_STALE_RATIO,
+            "is_fresh": False,
+        }
+        write_json(Path(report_path), payload)
+        return payload
+
     published = (
         pd.to_datetime(df["published"], errors="coerce", utc=True)
         if "published" in df.columns
