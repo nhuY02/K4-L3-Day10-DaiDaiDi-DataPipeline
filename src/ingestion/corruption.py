@@ -19,9 +19,8 @@ BLANK_SUMMARY_RATIO = 0.20
 NOISE_RATIO = 0.25
 TRUNCATE_TITLE_RATIO = 0.20
 STALE_DATE_RATIO = 0.35
-DUPLICATE_RATIO = 0.15
 
-STALE_DATE_SHIFT_DAYS = 365
+STALE_DATE_SHIFT_DAYS = 5 * 365
 TRUNCATED_TITLE_LENGTH = 7  # < 8 ky tu theo yeu cau cua de bai
 NOISE_SNIPPET = "%%% <<<garbled-ocr>>> ?????? zzzz 0x00 ### lorem-noise-42"
 
@@ -104,7 +103,9 @@ def corrupt_clean_dataframe(df: pd.DataFrame, output_log_path) -> pd.DataFrame:
     # Stale date va duplicate tac dong len chieu khac (ngay thang / so dong)
     # nen duoc boc doc lap, co the trung voi cac loi text o tren.
     stale_positions = sorted(rng.sample(range(remaining), _affected_count(STALE_DATE_RATIO, remaining)))
-    duplicate_positions = sorted(rng.sample(range(remaining), _affected_count(DUPLICATE_RATIO, remaining)))
+    # Duplicate exactly as many surviving rows as were dropped so corruption
+    # preserves the input row count without restoring any removed paper.
+    duplicate_positions = sorted(rng.sample(range(remaining), len(dropped_ids)))
 
     # --- 2. Blank summary: mo phong loi cao du lieu tra ve rong ---------------
     blanked_ids = working.loc[blank_positions, "paper_id"].tolist()
@@ -192,6 +193,10 @@ def corrupt_clean_dataframe(df: pd.DataFrame, output_log_path) -> pd.DataFrame:
     duplicated_ids = working.loc[duplicate_positions, "paper_id"].tolist()
     duplicates = working.loc[duplicate_positions].copy()
     working = pd.concat([working, duplicates], ignore_index=True)
+    if len(working) != input_rows:
+        raise RuntimeError(
+            f"Corruption row-count invariant failed: expected {input_rows}, got {len(working)}."
+        )
     scenarios.append(
         {
             "name": "duplicate_rows",

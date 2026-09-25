@@ -81,22 +81,14 @@ def _markdown_table(headers: list[str], rows: list[list[str]]) -> list[str]:
 def _expectation_rows(quality: dict[str, Any]) -> list[list[str]]:
     """Trich bang ket qua tung expectation cua Great Expectations."""
     rows: list[list[str]] = []
-    for item in quality.get("expectations", []) or []:
-        details = item.get("details") or {}
-        observed = details.get("observed_value")
-        unexpected = details.get("unexpected_count")
-        note_parts: list[str] = []
-        if observed is not None:
-            note_parts.append(f"observed={_format_value(observed)}")
-        if unexpected is not None:
-            note_parts.append(f"unexpected={_format_value(unexpected)}")
-        if not note_parts and details:
-            note_parts.append(_format_value(details)[:120])
+    for item in quality.get("results", []) or []:
+        result = item.get("result") or {}
         rows.append(
             [
-                f"`{item.get('name', 'unknown')}`",
+                f"`{item.get('expectation_type', 'unknown')}`",
+                f"`{item.get('column')}`" if item.get("column") else "-",
                 "PASS" if item.get("success") else "FAIL",
-                _escape_cell(", ".join(note_parts)) or "-",
+                _format_value(result) if result else "-",
             ]
         )
     return rows
@@ -104,8 +96,8 @@ def _expectation_rows(quality: dict[str, Any]) -> list[list[str]]:
 
 def _failed_expectations(quality: dict[str, Any]) -> list[str]:
     return [
-        str(item.get("name", "unknown"))
-        for item in (quality.get("expectations") or [])
+        str(item.get("expectation_type", "unknown"))
+        for item in (quality.get("results") or [])
         if not item.get("success")
     ]
 
@@ -117,7 +109,8 @@ def _freshness_rows(freshness: dict[str, Any]) -> list[list[str]]:
         ("stale_rows", "So dong qua han"),
         ("total_rows", "Tong so dong"),
         ("stale_ratio", "Ty le qua han"),
-        ("threshold_days", "Nguong tuoi (ngay)"),
+        ("freshness_threshold_days", "Nguong tuoi (ngay)"),
+        ("max_stale_ratio", "Ty le qua han toi da"),
         ("is_fresh", "Dat Freshness SLA"),
     )
     return [[label, _format_value(freshness.get(key))] for key, label in keys]
@@ -191,7 +184,12 @@ def generate_phase1_report(
     )
     if quality.get("message"):
         lines.extend([f"> {_escape_cell(str(quality['message']))}", ""])
-    lines.extend(_markdown_table(["Expectation", "Ket qua", "Chi tiet"], _expectation_rows(quality)))
+    lines.extend(
+        _markdown_table(
+            ["Expectation type", "Column", "Ket qua", "Result"],
+            _expectation_rows(quality),
+        )
+    )
 
     failed = _failed_expectations(quality)
     if failed:
@@ -208,7 +206,7 @@ def generate_phase1_report(
             f"{'' if quality.get('success') else ' - du lieu chua du dieu kien de index an toan.'}",
             f"- Freshness SLA: **{'PASS' if freshness.get('is_fresh') else 'FAIL'}** "
             f"({_format_value(freshness.get('stale_rows'))}/{_format_value(freshness.get('total_rows'))} dong qua "
-            f"{_format_value(freshness.get('threshold_days'))} ngay).",
+            f"{_format_value(freshness.get('freshness_threshold_days'))} ngay).",
         ]
     )
     if "retrieval_hit_rate" in metrics and "mean_token_f1" in metrics:
@@ -271,7 +269,6 @@ def generate_corruption_report(
             comparison_rows,
         )
     )
-
     lines.extend(["## 2. Data Quality Gate", ""])
     lines.extend(
         _markdown_table(
@@ -290,12 +287,26 @@ def generate_corruption_report(
             ],
         )
     )
+    quality_detail_rows = [
+        [state, *row]
+        for state, quality in (("Corrupted", corrupted_quality), ("Repaired", repaired_quality))
+        for row in _expectation_rows(quality)
+    ]
+    lines.extend(["### Chi tiet expectations", ""])
+    lines.extend(
+        _markdown_table(
+            ["Trang thai", "Expectation type", "Column", "Ket qua", "Result"],
+            quality_detail_rows,
+        )
+    )
 
     lines.extend(["## 3. Freshness SLA", ""])
     freshness_keys = (
         ("stale_rows", "So dong qua han"),
         ("total_rows", "Tong so dong"),
         ("stale_ratio", "Ty le qua han"),
+        ("freshness_threshold_days", "Nguong tuoi (ngay)"),
+        ("max_stale_ratio", "Ty le qua han toi da"),
         ("is_fresh", "Dat Freshness SLA"),
         ("latest_published", "Bai moi nhat"),
     )

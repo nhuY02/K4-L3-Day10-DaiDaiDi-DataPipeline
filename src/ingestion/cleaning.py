@@ -1,90 +1,111 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 import pandas as pd
 
-from core.utils import compact_join, normalize_whitespace
+from core.utils import normalize_whitespace
 from ingestion.crossref import PaperRecord
 
 
+CLEAN_COLUMNS = [
+    "paper_id",
+    "title",
+    "summary",
+    "authors",
+    "categories",
+    "primary_category",
+    "published",
+    "updated",
+    "abs_url",
+    "pdf_url",
+    "comment",
+    "authors_joined",
+    "categories_joined",
+    "summary_chars",
+    "age_days",
+    "text_for_embedding",
+]
+
+
 def build_clean_dataframe(records: list[PaperRecord], run_date: datetime) -> pd.DataFrame:
-    """Clean raw records thanh dataframe san sang de embed."""
-    rows: list[dict] = []
+    """Build a deterministic, retrieval-ready dataframe from raw records."""
 
-    for rec in records:
-        # 1. Normalize title, summary
-        title = normalize_whitespace(rec.title)
-        summary = normalize_whitespace(rec.summary)
-        if not title or not rec.paper_id:
-            continue
+    def clean_text(value: Any) -> str:
+        return normalize_whitespace(str(value)) if value is not None else ""
 
-        # 2. Normalize authors & categories
-        authors = [normalize_whitespace(a) for a in rec.authors if a and a.strip()]
-        categories = [normalize_whitespace(c) for c in rec.categories if c and c.strip()]
-
-        # 3. Parse published date
-        published_str = rec.published or ""
-        try:
-            if len(published_str) >= 10:
-                published_dt = datetime.strptime(published_str[:10], "%Y-%m-%d")
-            else:
-                published_dt = None
-        except ValueError:
-            published_dt = None
-
-        # 4. Tinh age_days
-        if published_dt:
-            run_dt = run_date.replace(tzinfo=None) if run_date.tzinfo else run_date
-            age_days = (run_dt - published_dt).days
+    def clean_list(value: Any) -> list[str]:
+        if isinstance(value, (list, tuple)):
+            values = value
+        elif value is None or value == "":
+            values = []
         else:
-            age_days = -1
+            values = [value]
+        return [text for item in values if (text := clean_text(item))]
 
-        # 5. Helper columns
-        authors_joined = compact_join(authors)
-        categories_joined = compact_join(categories)
-        summary_chars = len(summary)
+    run_timestamp = pd.Timestamp(run_date)
+    if run_timestamp.tzinfo is None:
+        run_timestamp = run_timestamp.tz_localize("UTC")
+    else:
+        run_timestamp = run_timestamp.tz_convert("UTC")
 
-        # text_for_embedding: combine title + summary + authors + categories
-        text_parts = [title, summary]
-        if authors_joined:
-            text_parts.append(f"Authors: {authors_joined}")
-        if categories_joined:
-            text_parts.append(f"Categories: {categories_joined}")
-        text_for_embedding = " | ".join(p for p in text_parts if p)
+    rows: list[dict[str, Any]] = []
+    for record in records:
+        paper_id = clean_text(record.paper_id)
+        title = clean_text(record.title)
+        summary = clean_text(record.summary)
+        authors = clean_list(record.authors)
+        categories = clean_list(record.categories)
+        primary_category = clean_text(record.primary_category) or (categories[0] if categories else "")
+
+        published_timestamp = pd.to_datetime(record.published, errors="coerce", utc=True)
+        if not paper_id or not title or pd.isna(published_timestamp):
+            continue
+        updated_timestamp = pd.to_datetime(record.updated, errors="coerce", utc=True)
+
+        published = published_timestamp.strftime("%Y-%m-%d")
+        updated = "" if pd.isna(updated_timestamp) else updated_timestamp.strftime("%Y-%m-%dT%H:%M:%SZ")
+        authors_joined = ", ".join(authors)
+        categories_joined = ", ".join(categories)
+        age_days = max(0, int((run_timestamp - published_timestamp).days))
+        text_for_embedding = "\n".join(
+            [
+                f"Title: {title}",
+                f"Authors: {authors_joined}",
+                f"Published: {published}",
+                f"Categories: {categories_joined}",
+                f"Summary: {summary}",
+            ]
+        )
 
         rows.append(
             {
-                "paper_id": rec.paper_id,
+                "paper_id": paper_id,
                 "title": title,
                 "summary": summary,
                 "authors": authors,
                 "categories": categories,
-                "primary_category": rec.primary_category,
-                "published": published_str,
-                "updated": rec.updated,
-                "abs_url": rec.abs_url,
-                "pdf_url": rec.pdf_url,
-                "comment": rec.comment,
-                "age_days": age_days,
+                "primary_category": primary_category,
+                "published": published,
+                "updated": updated,
+                "abs_url": clean_text(record.abs_url),
+                "pdf_url": clean_text(record.pdf_url),
+                "comment": clean_text(record.comment),
                 "authors_joined": authors_joined,
                 "categories_joined": categories_joined,
-                "summary_chars": summary_chars,
+                "summary_chars": len(summary),
+                "age_days": age_days,
                 "text_for_embedding": text_for_embedding,
+                "_paper_id_key": paper_id.casefold(),
             }
         )
 
     if not rows:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=CLEAN_COLUMNS)
 
-    df = pd.DataFrame(rows)
-
-    # 6. Drop duplicates & filter bad rows
-    df = df.drop_duplicates(subset=["paper_id"])
-    df = df[df["title"].str.strip().ne("")]
-    df = df[df["text_for_embedding"].str.strip().ne("")]
-
-    # 7. Sort by published date desc
-    df = df.sort_values("published", ascending=False).reset_index(drop=True)
-
-    return df
+    dataframe = pd.DataFrame(rows)
+    dataframe = dataframe.drop_duplicates(subset="_paper_id_key", keep="first")
+    dataframe = dataframe.sort_values(["_paper_id_key", "title"], kind="stable")
+    dataframe = dataframe.drop(columns="_paper_id_key")
+    return dataframe[CLEAN_COLUMNS].reset_index(drop=True)
